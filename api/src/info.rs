@@ -22,6 +22,7 @@ use crate::config::ApiVersion;
 pub struct BootInfo {
     /// The version of the `bootloader_api` crate. Must match the `bootloader` version.
     pub api_version: ApiVersion,
+    pub size: usize,
     /// A map of the physical memory regions of the underlying machine.
     ///
     /// The bootloader queries this information from the BIOS/UEFI firmware and translates this
@@ -52,21 +53,24 @@ pub struct BootInfo {
     pub rsdp_addr: Optional<u64>,
     /// The thread local storage (TLS) template of the kernel executable, if present.
     pub tls_template: Optional<TlsTemplate>,
+    pub modules: Modules,
 }
 
 impl BootInfo {
-    /// Create a new boot info structure with the given memory map.
+    /// Create a new boot info structure with the given memory map and modules.
     ///
     /// The other fields are initialized with default values.
-    pub fn new(memory_regions: MemoryRegions) -> Self {
+    pub fn new(memory_regions: MemoryRegions, modules: Modules) -> Self {
         Self {
             api_version: ApiVersion::new_default(),
+            size: 0,
             memory_regions,
             framebuffer: Optional::None,
             physical_memory_offset: Optional::None,
             recursive_index: Optional::None,
             rsdp_addr: Optional::None,
             tls_template: Optional::None,
+            modules,
         }
     }
 }
@@ -273,6 +277,50 @@ pub struct TlsTemplate {
     ///
     /// Corresponds to the combined length of the `.tdata` and `.tbss` sections.
     pub mem_size: u64,
+}
+
+#[derive(Debug)]
+#[repr(C)]
+pub struct Modules {
+    pub(crate) ptr: *mut Module,
+    pub(crate) len: usize,
+}
+
+impl ops::Deref for Modules {
+    type Target = [Module];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl ops::DerefMut for Modules {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl From<&'static mut [Module]> for Modules {
+    fn from(modules: &'static mut [Module]) -> Self {
+        Self {
+            ptr: modules.as_mut_ptr(),
+            len: modules.len(),
+        }
+    }
+}
+
+impl From<Modules> for &'static mut [Module] {
+    fn from(modules: Modules) -> Self {
+        unsafe { slice::from_raw_parts_mut(modules.ptr, modules.len) }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Module {
+    pub name: [u8; 64],
+    pub offset: usize,
+    pub len: usize,
 }
 
 /// FFI-safe variant of [`Option`].

@@ -53,7 +53,7 @@ where
 
         let elf_file = kernel.elf;
         for program_header in elf_file.program_iter() {
-            program::sanity_check(program_header, &elf_file)?;
+            // program::sanity_check(program_header, &elf_file)?;
         }
 
         let virtual_address_offset = match elf_file.header.pt2.type_().as_type() {

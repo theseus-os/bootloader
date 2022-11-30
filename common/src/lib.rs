@@ -5,7 +5,7 @@
 use crate::legacy_memory_region::{LegacyFrameAllocator, LegacyMemoryRegion};
 use bootloader_api::{
     config::Mapping,
-    info::{FrameBuffer, FrameBufferInfo, MemoryRegion, TlsTemplate},
+    info::{FrameBuffer, FrameBufferInfo, MemoryRegion, Module, Modules, TlsTemplate},
     BootInfo, BootloaderConfig,
 };
 use core::{alloc::Layout, arch::asm, mem::MaybeUninit, slice};
@@ -96,6 +96,7 @@ pub fn load_and_switch_to_kernel<I, D>(
     kernel: Kernel,
     mut frame_allocator: LegacyFrameAllocator<I, D>,
     mut page_tables: PageTables,
+    modules: &'static mut [Module],
     system_info: SystemInfo,
 ) -> !
 where
@@ -115,6 +116,7 @@ where
         frame_allocator,
         &mut page_tables,
         &mut mappings,
+        modules,
         system_info,
     );
     switch_to_kernel(page_tables, mappings, boot_info);
@@ -368,6 +370,7 @@ pub fn create_boot_info<I, D>(
     mut frame_allocator: LegacyFrameAllocator<I, D>,
     page_tables: &mut PageTables,
     mappings: &mut Mappings,
+    modules: &'static mut [Module],
     system_info: SystemInfo,
 ) -> &'static mut BootInfo
 where
@@ -377,12 +380,14 @@ where
     log::info!("Allocate bootinfo");
 
     // allocate and map space for the boot info
-    let (boot_info, memory_regions) = {
+    let (size, boot_info, memory_regions, modules_info) = {
         let boot_info_layout = Layout::new::<BootInfo>();
         let regions = frame_allocator.len() + 4; // up to 4 regions might be split into used/unused
         let memory_regions_layout = Layout::array::<MemoryRegion>(regions).unwrap();
+        let modules_layout = Layout::array::<Module>(modules.len()).unwrap();
         let (combined, memory_regions_offset) =
             boot_info_layout.extend(memory_regions_layout).unwrap();
+        let (combined, modules_offset) = combined.extend(modules_layout).unwrap();
 
         let boot_info_addr = mapping_addr(
             config.mappings.boot_info,
@@ -396,10 +401,13 @@ where
         );
 
         let memory_map_regions_addr = boot_info_addr + memory_regions_offset;
-        let memory_map_regions_end = boot_info_addr + combined.size();
+        let memory_map_regions_end = boot_info_addr + modules_offset;
+
+        let modules_addr = memory_map_regions_end;
+        let modules_end = boot_info_addr + combined.size();
 
         let start_page = Page::containing_address(boot_info_addr);
-        let end_page = Page::containing_address(memory_map_regions_end - 1u64);
+        let end_page = Page::containing_address(modules_end - 1u64);
         for page in Page::range_inclusive(start_page, end_page) {
             let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
             let frame = frame_allocator
@@ -424,11 +432,14 @@ where
             }
         }
 
+        let size  = combined.size();
         let boot_info: &'static mut MaybeUninit<BootInfo> =
             unsafe { &mut *boot_info_addr.as_mut_ptr() };
         let memory_regions: &'static mut [MaybeUninit<MemoryRegion>] =
             unsafe { slice::from_raw_parts_mut(memory_map_regions_addr.as_mut_ptr(), regions) };
-        (boot_info, memory_regions)
+        let modules_info: &'static mut [Module] =
+            unsafe { slice::from_raw_parts_mut(modules_addr.as_mut_ptr(), modules.len()) };
+        (size, boot_info, memory_regions, modules_info)
     };
 
     log::info!("Create Memory Map");
@@ -440,11 +451,17 @@ where
         mappings.kernel_slice_len,
     );
 
+    log::info!("Copy modules: {:0x?}", modules.len());
+
+    // copy modules
+    modules_info.copy_from_slice(modules);
+
     log::info!("Create bootinfo");
 
     // create boot info
     let boot_info = boot_info.write({
-        let mut info = BootInfo::new(memory_regions.into());
+        let mut info = BootInfo::new(memory_regions.into(), modules_info.into());
+        info.size = size;
         info.framebuffer = mappings
             .framebuffer
             .map(|addr| unsafe {
