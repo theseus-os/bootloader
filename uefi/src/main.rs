@@ -109,8 +109,12 @@ fn main_inner(image: Handle, mut st: SystemTable<Boot>) -> Status {
         .exit_boot_services(image, mmap_storage)
         .expect("Failed to exit boot services");
 
-    let mut frame_allocator =
-        LegacyFrameAllocator::new(memory_map.copied().map(UefiMemoryDescriptor));
+    // Allocating frames below 0x10_000 causes problems when allocating AP
+    // startup trampolines
+    let mut frame_allocator = LegacyFrameAllocator::new_starting_at(
+        PhysFrame::containing_address(PhysAddr::new(0x10_000)),
+        memory_map.copied().map(UefiMemoryDescriptor),
+    );
 
     let page_tables = create_page_tables(&mut frame_allocator);
 
@@ -208,24 +212,24 @@ fn allocate_slice<T>(len: usize, ty: MemoryType, st: &SystemTable<Boot>) -> &'st
 
 fn load_kernel_file_from_disk(image: Handle, st: &SystemTable<Boot>) -> Option<&'static mut [u8]> {
     let file_system = open_file_system(image, st)?;
-    let filename = cstr16!("kernel-x86_64");
     let mut root = file_system.open_volume().unwrap();
-    let file_handle = root
+    let filename = cstr16!("kernel-x86_64");
+    let kernel_file_handle = root
         .open(filename, FileMode::Read, FileAttribute::empty())
         .expect("Failed to load kernel (expected file named `kernel-x86_64`)");
-    let mut file = match file_handle.into_type().unwrap() {
+    let mut kernel_file = match kernel_file_handle.into_type().unwrap() {
         uefi::proto::media::file::FileType::Regular(f) => f,
         uefi::proto::media::file::FileType::Dir(_) => panic!(),
     };
 
     let mut buf = [0; 500];
-    let info: &mut FileInfo = file.get_info(&mut buf).unwrap();
-    let size = usize::try_from(info.file_size()).unwrap();
+    let kernel_info: &mut FileInfo = kernel_file.get_info(&mut buf).unwrap();
+    let kernel_size = usize::try_from(kernel_info.file_size()).unwrap();
 
-    let slice = allocate_slice(size, MemoryType::LOADER_DATA, st);
-    file.read(slice).unwrap();
+    let kernel_slice = allocate_slice(kernel_size, MemoryType::LOADER_DATA, st);
+    kernel_file.read(kernel_slice).unwrap();
 
-    Some(slice)
+    Some(kernel_slice)
 }
 
 fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut [Module] {
@@ -377,7 +381,8 @@ fn load_kernel_file_from_tftp_boot_server(
     Some(kernel_slice)
 }
 
-/// Creates page table abstraction types for both the bootloader and kernel page tables.
+/// Creates page table abstraction types for both the bootloader and kernel page
+/// tables.
 fn create_page_tables(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> bootloader_x86_64_common::PageTables {

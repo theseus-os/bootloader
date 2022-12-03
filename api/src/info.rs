@@ -54,10 +54,10 @@ pub struct BootInfo {
     pub rsdp_addr: Optional<u64>,
     /// The thread local storage (TLS) template of the kernel executable, if present.
     pub tls_template: Optional<TlsTemplate>,
+    /// The UEFI modules in the image.
     pub modules: Modules,
+    /// The ELF sections of the kernel executable.
     pub elf_sections: ElfSections,
-    pub stack_start: usize,
-    pub stack_end: usize,
 }
 
 impl BootInfo {
@@ -76,8 +76,6 @@ impl BootInfo {
             tls_template: Optional::None,
             modules,
             elf_sections,
-            stack_start: 0,
-            stack_end: 0,
         }
     }
 }
@@ -322,6 +320,7 @@ impl From<Modules> for &'static mut [Module] {
     }
 }
 
+/// A file in the `modules` directory in the kernel image.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Module {

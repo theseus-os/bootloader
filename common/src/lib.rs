@@ -178,16 +178,17 @@ where
     let stack_start_addr = mapping_addr(
         config.mappings.kernel_stack,
         config.kernel_stack_size,
-        // TODO
+        // TODO: Is this the correct alignment?
         4096,
         &mut used_entries,
     );
     let stack_start: Page = Page::containing_address(stack_start_addr);
     let stack_end = {
         let end_addr = stack_start_addr + config.kernel_stack_size;
-        Page::containing_address(end_addr - 1u64)
+        Page::containing_address(end_addr)
     };
-    for page in Page::range_inclusive(stack_start, stack_end) {
+    // + 1 for guard page
+    for page in Page::range(stack_start + 1, stack_end) {
         let frame = frame_allocator
             .allocate_frame()
             .expect("frame allocation failed when mapping a kernel stack");
@@ -325,7 +326,6 @@ where
     Mappings {
         framebuffer: framebuffer_virt_addr,
         entry_point,
-        stack_start,
         stack_end,
         used_entries,
         physical_memory_offset,
@@ -341,8 +341,6 @@ where
 pub struct Mappings {
     /// The entry point address of the kernel.
     pub entry_point: VirtAddr,
-    /// The stack start page of the kernel.
-    pub stack_start: Page,
     /// The stack end page of the kernel.
     pub stack_end: Page,
     /// Keeps track of used entries in the level 4 page table, useful for finding a free
@@ -517,8 +515,6 @@ where
         info.recursive_index = mappings.recursive_index.map(Into::into).into();
         info.rsdp_addr = system_info.rsdp_addr.map(|addr| addr.as_u64()).into();
         info.tls_template = mappings.tls_template.into();
-        info.stack_start = mappings.stack_start.start_address().as_u64() as usize;
-        info.stack_end = mappings.stack_end.start_address().as_u64() as usize;
         info
     });
 
@@ -568,9 +564,10 @@ pub struct PageTables {
 
 /// Performs the actual context switch.
 unsafe fn context_switch(addresses: Addresses) -> ! {
+    log::info!("stuff: {:0x?}", addresses.stack_top.as_u64());
     unsafe {
         asm!(
-            "mov cr3, {}; mov rsp, {}; push 0; jmp {}",
+            "mov cr3, {}; mov rsp, {}; jmp {}",
             in(reg) addresses.page_table.start_address().as_u64(),
             in(reg) addresses.stack_top.as_u64(),
             in(reg) addresses.entry_point.as_u64(),

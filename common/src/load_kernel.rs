@@ -32,7 +32,6 @@ struct Inner<'a, M, F> {
     virtual_address_offset: u64,
     page_table: &'a mut M,
     frame_allocator: &'a mut F,
-    // stack_segment: usize,
 }
 
 impl<'a, M, F> Loader<'a, M, F>
@@ -86,7 +85,6 @@ where
                 virtual_address_offset,
                 page_table,
                 frame_allocator,
-                // stack_segment,
             },
         };
 
@@ -96,7 +94,6 @@ where
     fn load_segments(&mut self) -> Result<Option<TlsTemplate>, &'static str> {
         // Load the segments into virtual memory.
         let mut tls_template = None;
-
         for program_header in self.elf_file.program_iter() {
             match program_header.get_type()? {
                 Type::Load => self.inner.handle_load_segment(program_header)?,
@@ -168,7 +165,6 @@ where
             if let Ok(Type::Load) = program.get_type() {
                 max_start = core::cmp::max(max_start, program.physical_addr());
                 if max_start == program.physical_addr() {
-                    // TODO: File size or mem size?
                     max_end = program.physical_addr() + program.file_size();
                 }
             }
@@ -189,8 +185,8 @@ where
         let old_phys_start_addr = self.kernel_offset + segment.offset();
 
         let new_phys_start_addr = PhysAddr::new(segment.physical_addr());
-        let new_start_frame = PhysFrame::containing_address(new_phys_start_addr);
-        let new_end_frame =
+        let start_frame = PhysFrame::containing_address(new_phys_start_addr);
+        let end_frame =
             PhysFrame::containing_address(new_phys_start_addr + segment.mem_size() - 1u64);
 
         let virt_start_addr = VirtAddr::new(segment.virtual_addr()) + self.virtual_address_offset;
@@ -205,8 +201,8 @@ where
         }
 
         // map all frames of the segment at the desired virtual address
-        for frame in PhysFrame::range_inclusive(new_start_frame, new_end_frame) {
-            let offset = frame - new_start_frame;
+        for frame in PhysFrame::range_inclusive(start_frame, end_frame) {
+            let offset = frame - start_frame;
             let page = start_page + offset;
             let flusher = unsafe {
                 self.page_table
