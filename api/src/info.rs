@@ -1,4 +1,4 @@
-use core::{ops, slice};
+use core::{ops, slice, str};
 
 use crate::config::ApiVersion;
 
@@ -344,7 +344,7 @@ impl Module {
             .iter()
             .position(|byte| *byte == 0)
             .unwrap_or_else(|| self.name.len());
-        core::str::from_utf8(&self.name[..end]).expect("invalid bytes in module name")
+        str::from_utf8(&self.name[..end]).expect("invalid bytes in module name")
     }
 }
 
@@ -408,7 +408,7 @@ impl ElfSection {
             .iter()
             .position(|byte| *byte == 0)
             .unwrap_or_else(|| self.name.len());
-        core::str::from_utf8(&self.name[..end]).expect("invalid bytes in section name")
+        str::from_utf8(&self.name[..end]).expect("invalid bytes in section name")
     }
 }
 
