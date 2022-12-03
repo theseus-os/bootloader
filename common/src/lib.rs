@@ -1,11 +1,11 @@
 #![no_std]
-#![feature(step_trait)]
+#![feature(step_trait, maybe_uninit_write_slice, maybe_uninit_slice)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::legacy_memory_region::{LegacyFrameAllocator, LegacyMemoryRegion};
 use bootloader_api::{
     config::Mapping,
-    info::{FrameBuffer, FrameBufferInfo, MemoryRegion, Module, Modules, TlsTemplate},
+    info::{ElfSection, FrameBuffer, FrameBufferInfo, MemoryRegion, Module, Modules, TlsTemplate},
     BootInfo, BootloaderConfig,
 };
 use core::{alloc::Layout, arch::asm, mem::MaybeUninit, slice};
@@ -105,7 +105,7 @@ where
 {
     let config = kernel.config;
     let mut mappings = set_up_mappings(
-        kernel,
+        &kernel,
         &mut frame_allocator,
         &mut page_tables,
         system_info.framebuffer.as_ref(),
@@ -113,6 +113,7 @@ where
     );
     let boot_info = create_boot_info(
         &config,
+        kernel,
         frame_allocator,
         &mut page_tables,
         &mut mappings,
@@ -137,7 +138,7 @@ where
 /// This function reacts to unexpected situations (e.g. invalid kernel ELF file) with a panic, so
 /// errors are not recoverable.
 pub fn set_up_mappings<I, D>(
-    kernel: Kernel,
+    kernel: &Kernel,
     frame_allocator: &mut LegacyFrameAllocator<I, D>,
     page_tables: &mut PageTables,
     framebuffer: Option<&RawFrameBufferInfo>,
@@ -162,23 +163,34 @@ where
     enable_write_protect_bit();
 
     let config = kernel.config;
-    let kernel_slice_start = kernel.start_address as u64;
-    let kernel_slice_len = u64::try_from(kernel.len).unwrap();
+    // let kernel_slice_start = kernel.start_address as u64;
+    // let kernel_slice_len = u64::try_from(kernel.len).unwrap();
 
-    let (entry_point, tls_template) = load_kernel::load_kernel(
-        kernel,
-        kernel_page_table,
-        frame_allocator,
-        &mut used_entries,
-    )
-    .expect("no entry point");
+    let (kernel_slice_start, kernel_slice_len, entry_point, tls_template) =
+        load_kernel::load_kernel(
+            &kernel,
+            kernel_page_table,
+            frame_allocator,
+            &mut used_entries,
+        )
+        .expect("no entry point");
     log::info!("Entry point at: {:#x}", entry_point.as_u64());
 
     // create a stack
+    // let stack_start_addr = mapping_addr(
+    //     config.mappings.kernel_stack,
+    //     config.kernel_stack_size,
+    //     16,
+    //     &mut used_entries,
+    // );
+    // let stack_section = kernel.elf.find_section_by_name(".stack").unwrap();
     let stack_start_addr = mapping_addr(
         config.mappings.kernel_stack,
+        // Mapping::FixedAddress(stack_section.address()),
         config.kernel_stack_size,
-        16,
+        // stack_section.size(),
+        // TODO
+        4096,
         &mut used_entries,
     );
     let stack_start: Page = Page::containing_address(stack_start_addr);
@@ -186,6 +198,8 @@ where
         let end_addr = stack_start_addr + config.kernel_stack_size;
         Page::containing_address(end_addr - 1u64)
     };
+    log::info!("stack_start: {stack_start:0x?}");
+    log::info!("stack_end: {stack_end:0x?}");
     for page in Page::range_inclusive(stack_start, stack_end) {
         let frame = frame_allocator
             .allocate_frame()
@@ -196,6 +210,8 @@ where
             Err(err) => panic!("failed to map page {:?}: {:?}", page, err),
         }
     }
+    // let stack_section = kernel.elf.find_section_by_name(".stack").unwrap();
+    // let stack_end = Page::containing_address(VirtAddr::new(stack_section.address() + stack_section.size() - 4096));
 
     // identity-map context switch function, so that we don't get an immediate pagefault
     // after switching the active page table
@@ -324,6 +340,7 @@ where
     Mappings {
         framebuffer: framebuffer_virt_addr,
         entry_point,
+        stack_start,
         stack_end,
         used_entries,
         physical_memory_offset,
@@ -339,6 +356,8 @@ where
 pub struct Mappings {
     /// The entry point address of the kernel.
     pub entry_point: VirtAddr,
+    /// The stack start page of the kernel.
+    pub stack_start: Page,
     /// The stack end page of the kernel.
     pub stack_end: Page,
     /// Keeps track of used entries in the level 4 page table, useful for finding a free
@@ -367,6 +386,7 @@ pub struct Mappings {
 /// are taken from the given `frame_allocator`.
 pub fn create_boot_info<I, D>(
     config: &BootloaderConfig,
+    kernel: Kernel,
     mut frame_allocator: LegacyFrameAllocator<I, D>,
     page_tables: &mut PageTables,
     mappings: &mut Mappings,
@@ -380,14 +400,20 @@ where
     log::info!("Allocate bootinfo");
 
     // allocate and map space for the boot info
-    let (size, boot_info, memory_regions, modules_info) = {
+    let (boot_info, memory_regions, modules_info, elf_sections, size) = {
         let boot_info_layout = Layout::new::<BootInfo>();
+
         let regions = frame_allocator.len() + 4; // up to 4 regions might be split into used/unused
         let memory_regions_layout = Layout::array::<MemoryRegion>(regions).unwrap();
-        let modules_layout = Layout::array::<Module>(modules.len()).unwrap();
         let (combined, memory_regions_offset) =
             boot_info_layout.extend(memory_regions_layout).unwrap();
+
+        let modules_layout = Layout::array::<Module>(modules.len()).unwrap();
         let (combined, modules_offset) = combined.extend(modules_layout).unwrap();
+
+        let sections = kernel.elf.section_iter().count();
+        let elf_sections_layout = Layout::array::<ElfSection>(sections).unwrap();
+        let (combined, elf_sections_offset) = combined.extend(elf_sections_layout).unwrap();
 
         let boot_info_addr = mapping_addr(
             config.mappings.boot_info,
@@ -401,13 +427,12 @@ where
         );
 
         let memory_map_regions_addr = boot_info_addr + memory_regions_offset;
-        let memory_map_regions_end = boot_info_addr + modules_offset;
-
-        let modules_addr = memory_map_regions_end;
-        let modules_end = boot_info_addr + combined.size();
+        let modules_addr = boot_info_addr + modules_offset;
+        let elf_sections_addr = boot_info_addr + elf_sections_offset;
+        let elf_sections_end = boot_info_addr + combined.size();
 
         let start_page = Page::containing_address(boot_info_addr);
-        let end_page = Page::containing_address(modules_end - 1u64);
+        let end_page = Page::containing_address(elf_sections_end - 1u64);
         for page in Page::range_inclusive(start_page, end_page) {
             let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
             let frame = frame_allocator
@@ -432,14 +457,21 @@ where
             }
         }
 
-        let size  = combined.size();
         let boot_info: &'static mut MaybeUninit<BootInfo> =
             unsafe { &mut *boot_info_addr.as_mut_ptr() };
         let memory_regions: &'static mut [MaybeUninit<MemoryRegion>] =
             unsafe { slice::from_raw_parts_mut(memory_map_regions_addr.as_mut_ptr(), regions) };
-        let modules_info: &'static mut [Module] =
+        let modules_info: &'static mut [MaybeUninit<Module>] =
             unsafe { slice::from_raw_parts_mut(modules_addr.as_mut_ptr(), modules.len()) };
-        (size, boot_info, memory_regions, modules_info)
+        let elf_sections: &'static mut [MaybeUninit<ElfSection>] =
+            unsafe { slice::from_raw_parts_mut(elf_sections_addr.as_mut_ptr(), sections) };
+        (
+            boot_info,
+            memory_regions,
+            modules_info,
+            elf_sections,
+            combined.size(),
+        )
     };
 
     log::info!("Create Memory Map");
@@ -451,16 +483,36 @@ where
         mappings.kernel_slice_len,
     );
 
-    log::info!("Copy modules: {:0x?}", modules.len());
+    log::info!("Copy modules");
 
     // copy modules
-    modules_info.copy_from_slice(modules);
+    let modules_info = MaybeUninit::write_slice(modules_info, modules);
+
+    log::info!("Create elf sections");
+
+    for (data, section) in kernel.elf.section_iter().zip(elf_sections.iter_mut()) {
+        let mut name_buf = [0; 64];
+        let name = data.get_name(&kernel.elf).unwrap_or_default();
+        name_buf[..name.len()].copy_from_slice(name.as_bytes());
+
+        section.write(ElfSection {
+            name: name_buf,
+            start: data.address() as usize,
+            size: data.size() as usize,
+            flags: data.flags(),
+        });
+    }
+    let elf_sections = unsafe { MaybeUninit::slice_assume_init_mut(elf_sections) };
 
     log::info!("Create bootinfo");
 
     // create boot info
     let boot_info = boot_info.write({
-        let mut info = BootInfo::new(memory_regions.into(), modules_info.into());
+        let mut info = BootInfo::new(
+            memory_regions.into(),
+            modules_info.into(),
+            elf_sections.into(),
+        );
         info.size = size;
         info.framebuffer = mappings
             .framebuffer
@@ -481,6 +533,8 @@ where
         info.recursive_index = mappings.recursive_index.map(Into::into).into();
         info.rsdp_addr = system_info.rsdp_addr.map(|addr| addr.as_u64()).into();
         info.tls_template = mappings.tls_template.into();
+        info.stack_start = mappings.stack_start.start_address().as_u64() as usize;
+        info.stack_end = mappings.stack_end.start_address().as_u64() as usize;
         info
     });
 

@@ -23,7 +23,7 @@ use super::Kernel;
 const COPIED: Flags = Flags::BIT_9;
 
 struct Loader<'a, M, F> {
-    elf_file: ElfFile<'a>,
+    elf_file: &'a ElfFile<'a>,
     inner: Inner<'a, M, F>,
 }
 
@@ -32,6 +32,7 @@ struct Inner<'a, M, F> {
     virtual_address_offset: u64,
     page_table: &'a mut M,
     frame_allocator: &'a mut F,
+    // stack_segment: usize,
 }
 
 impl<'a, M, F> Loader<'a, M, F>
@@ -40,7 +41,7 @@ where
     F: FrameAllocator<Size4KiB>,
 {
     fn new(
-        kernel: Kernel<'a>,
+        kernel: &'a Kernel<'a>,
         page_table: &'a mut M,
         frame_allocator: &'a mut F,
         used_entries: &mut UsedLevel4Entries,
@@ -51,7 +52,7 @@ where
             return Err("Loaded kernel ELF file is not sufficiently aligned");
         }
 
-        let elf_file = kernel.elf;
+        let elf_file = &kernel.elf;
         for program_header in elf_file.program_iter() {
             // program::sanity_check(program_header, &elf_file)?;
         }
@@ -81,6 +82,21 @@ where
         used_entries.mark_segments(elf_file.program_iter(), virtual_address_offset);
 
         header::sanity_check(&elf_file)?;
+
+        // let mut stack_segment = None;
+        // let stack_section = elf_file
+        // .find_section_by_name(".stack")
+        // .expect("no stack section found");
+        // for (i, program_header) in elf_file.program_iter().enumerate() {
+        //     if program_header.virtual_addr() == stack_section.address()
+        //         && program_header.mem_size() == stack_section.size()
+        //     {
+        //         stack_segment = Some(i);
+        //         break;
+        //     }
+        // }
+        // let stack_segment = stack_segment.expect("no stack segment found");
+
         let loader = Loader {
             elf_file,
             inner: Inner {
@@ -88,6 +104,7 @@ where
                 virtual_address_offset,
                 page_table,
                 frame_allocator,
+                // stack_segment,
             },
         };
 
@@ -97,7 +114,12 @@ where
     fn load_segments(&mut self) -> Result<Option<TlsTemplate>, &'static str> {
         // Load the segments into virtual memory.
         let mut tls_template = None;
-        for program_header in self.elf_file.program_iter() {
+
+        for (i, program_header) in self.elf_file.program_iter().enumerate() {
+            // if i == self.inner.stack_segment {
+            //     continue;
+            // }
+
             match program_header.get_type()? {
                 Type::Load => self.inner.handle_load_segment(program_header)?,
                 Type::Tls => {
@@ -143,6 +165,43 @@ where
     fn entry_point(&self) -> VirtAddr {
         VirtAddr::new(self.elf_file.header.pt2.entry_point() + self.inner.virtual_address_offset)
     }
+
+    fn start(&self) -> u64 {
+        // TODO: I'm pretty sure this doesn't work with dynamic segments.
+        self.elf_file
+            .program_iter()
+            .filter(|program| match program.get_type() {
+                Ok(ty) => match ty {
+                    Type::Load => true,
+                    _ => false,
+                },
+                Err(_) => false,
+            })
+            .map(|program| program.physical_addr())
+            .min()
+            .unwrap()
+    }
+
+    fn len(&self) -> u64 {
+        let mut max_start = 0;
+        let mut max_end = 0;
+
+        for (i, program) in self.elf_file.program_iter().enumerate() {
+            // if i == self.inner.stack_segment {
+            //     continue;
+            // }
+
+            if let Ok(Type::Load) = program.get_type() {
+                max_start = core::cmp::max(max_start, program.physical_addr());
+                if max_start == program.physical_addr() {
+                    // TODO: File size or mem size?
+                    max_end = program.physical_addr() + program.file_size();
+                }
+            }
+        }
+
+        max_end - self.start()
+    }
 }
 
 impl<'a, M, F> Inner<'a, M, F>
@@ -153,10 +212,15 @@ where
     fn handle_load_segment(&mut self, segment: ProgramHeader) -> Result<(), &'static str> {
         log::info!("Handling Segment: {:x?}", segment);
 
-        let phys_start_addr = self.kernel_offset + segment.offset();
-        let start_frame: PhysFrame = PhysFrame::containing_address(phys_start_addr);
-        let end_frame: PhysFrame =
-            PhysFrame::containing_address(phys_start_addr + segment.file_size() - 1u64);
+        let old_phys_start_addr = self.kernel_offset + segment.offset();
+        // let old_start_frame: PhysFrame = PhysFrame::containing_address(old_phys_start_addr);
+        // let old_end_frame: PhysFrame =
+        //     PhysFrame::containing_address(old_phys_start_addr + segment.file_size() - 1u64);
+
+        let new_phys_start_addr = PhysAddr::new(segment.physical_addr());
+        let new_start_frame = PhysFrame::containing_address(new_phys_start_addr);
+        let new_end_frame =
+            PhysFrame::containing_address(new_phys_start_addr + segment.mem_size() - 1u64);
 
         let virt_start_addr = VirtAddr::new(segment.virtual_addr()) + self.virtual_address_offset;
         let start_page: Page = Page::containing_address(virt_start_addr);
@@ -170,9 +234,15 @@ where
         }
 
         // map all frames of the segment at the desired virtual address
-        for frame in PhysFrame::range_inclusive(start_frame, end_frame) {
-            let offset = frame - start_frame;
+        // log::info!(
+        //     "copying physical {:p} to {:p}",
+        //     old_phys_start_addr,
+        //     new_phys_start_addr
+        // );
+        for frame in PhysFrame::range_inclusive(new_start_frame, new_end_frame) {
+            let offset = frame - new_start_frame;
             let page = start_page + offset;
+            // log::info!("frame: {:?}, page: {:?}", frame, page);
             let flusher = unsafe {
                 self.page_table
                     .map_to(page, frame, segment_flags, self.frame_allocator)
@@ -182,11 +252,26 @@ where
             flusher.ignore();
         }
 
+        unsafe {
+            core::ptr::copy(
+                old_phys_start_addr.as_u64() as *const u8,
+                new_phys_start_addr.as_u64() as *mut u8,
+                segment.file_size() as usize,
+            )
+        };
+        unsafe {
+            core::ptr::write_bytes(
+                (old_phys_start_addr + segment.file_size()).as_u64() as usize as *mut u8,
+                0,
+                (segment.mem_size() - segment.file_size()) as usize,
+            );
+        };
+
         // Handle .bss section (mem_size > file_size)
-        if segment.mem_size() > segment.file_size() {
-            // .bss section (or similar), which needs to be mapped and zeroed
-            self.handle_bss_section(&segment, segment_flags)?;
-        }
+        // if segment.mem_size() > segment.file_size() {
+        //     // .bss section (or similar), which needs to be mapped and zeroed
+        //     self.handle_bss_section(&segment, segment_flags)?;
+        // }
 
         Ok(())
     }
@@ -564,13 +649,18 @@ fn check_is_in_load(elf_file: &ElfFile, virt_offset: u64) -> Result<(), &'static
 /// Returns the kernel entry point address, it's thread local storage template (if any),
 /// and a structure describing which level 4 page table entries are in use.  
 pub fn load_kernel(
-    kernel: Kernel<'_>,
+    kernel: &Kernel<'_>,
     page_table: &mut (impl MapperAllSizes + Translate),
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     used_entries: &mut UsedLevel4Entries,
-) -> Result<(VirtAddr, Option<TlsTemplate>), &'static str> {
+) -> Result<(u64, u64, VirtAddr, Option<TlsTemplate>), &'static str> {
     let mut loader = Loader::new(kernel, page_table, frame_allocator, used_entries)?;
     let tls_template = loader.load_segments()?;
 
-    Ok((loader.entry_point(), tls_template))
+    Ok((
+        loader.start(),
+        loader.len(),
+        loader.entry_point(),
+        tls_template,
+    ))
 }

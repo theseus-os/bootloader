@@ -251,13 +251,13 @@ fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut
         .unwrap();
 
     let mut num_modules = 0;
-    let mut modules_size = 0;
+    let mut num_pages = 0;
     let mut buf = [0; 500];
 
     while let Some(info) = dir.read_entry(&mut buf).unwrap() {
         if !info.attribute().contains(FileAttribute::DIRECTORY) {
             num_modules += 1;
-            modules_size += info.file_size() as usize;
+            num_pages += ((info.file_size() as usize - 1) / 4096) + 1;
         }
     }
 
@@ -265,38 +265,33 @@ fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut
         let len = num_modules;
         let size = core::mem::size_of::<Module>() * len;
         let num_pages = ((size - 1) / 4096) + 1;
-        log::info!("allocating: {size:0x?} {num_pages}");
+        // log::info!("allocating: {size:0x?} {num_pages}");
         let ptr = st
             .boot_services()
             .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, num_pages)
             .unwrap() as *mut Module;
-        log::info!("allocated");
+        // log::info!("allocated");
         unsafe { ptr::write_bytes(ptr, 0, len) };
-        log::info!("writing");
+        // log::info!("writing");
         let slice = unsafe { slice::from_raw_parts_mut(ptr, len) };
-        log::info!("constructing");
+        // log::info!("constructing");
         slice
     };
     let raw_bytes: &'static mut [u8] = {
-        let len = modules_size;
-        let num_pages = ((len - 1) / 4096) + 1;
-        log::info!("allocating: {len:0x?} {num_pages}");
         let ptr = st
             .boot_services()
             .allocate_pages(AllocateType::AnyPages, MemoryType::custom(0x80000000), num_pages)
             .unwrap() as *mut u8;
-        log::info!("allocated");
+        let len = num_pages * 4096;
         unsafe { ptr::write_bytes(ptr, 0, len) };
-        log::info!("writing");
         let slice = unsafe { slice::from_raw_parts_mut(ptr, len) };
-        log::info!("constructing");
         slice
     };
 
     dir.reset_entry_readout().unwrap();
 
     let mut idx = 0;
-    let mut bytes_idx = 0;
+    let mut num_pages = 0;
 
     while let Some(info) = dir.read_entry(&mut buf).unwrap() {
         if !info.attribute().contains(FileAttribute::DIRECTORY) {
@@ -309,8 +304,7 @@ fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut
                 .into_regular_file()
                 .unwrap();
 
-            // let slice = allocate_slice(len, MemoryType::custom(0x80000000 + idx as u32), st);
-            file.read(&mut raw_bytes[bytes_idx..]).unwrap();
+            file.read(&mut raw_bytes[(num_pages * 4096)..]).unwrap();
 
             let mut name_buf = [0; 64];
             let mut name_idx = 0;
@@ -322,12 +316,12 @@ fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut
 
             modules[idx] = Module {
                 name: name_buf,
-                offset: bytes_idx,
+                offset: num_pages * 4096,
                 len,
             };
 
             idx += 1;
-            bytes_idx += len;
+            num_pages += ((len - 1) / 4096) + 1;
         }
     }
 

@@ -54,13 +54,16 @@ pub struct BootInfo {
     /// The thread local storage (TLS) template of the kernel executable, if present.
     pub tls_template: Optional<TlsTemplate>,
     pub modules: Modules,
+    pub elf_sections: ElfSections,
+    pub stack_start: usize,
+    pub stack_end: usize,
 }
 
 impl BootInfo {
     /// Create a new boot info structure with the given memory map and modules.
     ///
     /// The other fields are initialized with default values.
-    pub fn new(memory_regions: MemoryRegions, modules: Modules) -> Self {
+    pub fn new(memory_regions: MemoryRegions, modules: Modules, elf_sections: ElfSections) -> Self {
         Self {
             api_version: ApiVersion::new_default(),
             size: 0,
@@ -71,6 +74,9 @@ impl BootInfo {
             rsdp_addr: Optional::None,
             tls_template: Optional::None,
             modules,
+            elf_sections,
+            stack_start: 0,
+            stack_end: 0,
         }
     }
 }
@@ -282,7 +288,7 @@ pub struct TlsTemplate {
 #[derive(Debug)]
 #[repr(C)]
 pub struct Modules {
-    pub(crate) ptr: *mut Module,
+    pub ptr: *mut Module,
     pub(crate) len: usize,
 }
 
@@ -321,6 +327,51 @@ pub struct Module {
     pub name: [u8; 64],
     pub offset: usize,
     pub len: usize,
+}
+
+#[derive(Debug)]
+#[repr(C)]
+pub struct ElfSections {
+    pub(crate) ptr: *mut ElfSection,
+    pub(crate) len: usize,
+}
+
+impl ops::Deref for ElfSections {
+    type Target = [ElfSection];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl ops::DerefMut for ElfSections {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl From<&'static mut [ElfSection]> for ElfSections {
+    fn from(elf_sections: &'static mut [ElfSection]) -> Self {
+        Self {
+            ptr: elf_sections.as_mut_ptr(),
+            len: elf_sections.len(),
+        }
+    }
+}
+
+impl From<ElfSections> for &'static mut [ElfSection] {
+    fn from(elf_sections: ElfSections) -> Self {
+        unsafe { slice::from_raw_parts_mut(elf_sections.ptr, elf_sections.len) }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct ElfSection {
+    pub name: [u8; 64],
+    pub start: usize,
+    pub size: usize,
+    pub flags: u64,
 }
 
 /// FFI-safe variant of [`Option`].
