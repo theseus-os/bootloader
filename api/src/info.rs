@@ -22,6 +22,7 @@ use crate::config::ApiVersion;
 pub struct BootInfo {
     /// The version of the `bootloader_api` crate. Must match the `bootloader` version.
     pub api_version: ApiVersion,
+    /// The size of the boot info.
     pub size: usize,
     /// A map of the physical memory regions of the underlying machine.
     ///
@@ -60,7 +61,7 @@ pub struct BootInfo {
 }
 
 impl BootInfo {
-    /// Create a new boot info structure with the given memory map and modules.
+    /// Create a new boot info structure with the given memory map, modules, and elf sections.
     ///
     /// The other fields are initialized with default values.
     pub fn new(memory_regions: MemoryRegions, modules: Modules, elf_sections: ElfSections) -> Self {

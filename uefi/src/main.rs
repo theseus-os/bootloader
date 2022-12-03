@@ -5,7 +5,7 @@
 
 use crate::memory_descriptor::UefiMemoryDescriptor;
 use bootloader_api::{
-    info::{FrameBufferInfo, Module, Modules},
+    info::{FrameBufferInfo, Module},
     BootloaderConfig,
 };
 use bootloader_x86_64_common::{
@@ -86,15 +86,14 @@ fn main_inner(image: Handle, mut st: SystemTable<Boot>) -> Status {
         *SYSTEM_TABLE.get() = None;
     }
 
-    let modules = load_modules_from_disk(image, &st);
-
-    // log::info!("successfuly loaded modules");
-
     log::info!("UEFI bootloader started");
     log::info!("Reading kernel and configuration from disk was successful");
     if let Some(framebuffer) = framebuffer {
         log::info!("Using framebuffer at {:#x}", framebuffer.addr);
     }
+
+    log::info!("Loading modules");
+    let modules = load_modules_from_disk(image, &st);
 
     let mmap_storage = {
         let max_mmap_size =
@@ -105,7 +104,7 @@ fn main_inner(image: Handle, mut st: SystemTable<Boot>) -> Status {
         unsafe { slice::from_raw_parts_mut(ptr, max_mmap_size) }
     };
 
-    log::trace!("exiting boot services");
+    log::trace!("Exiting boot services");
     let (system_table, memory_map) = st
         .exit_boot_services(image, mmap_storage)
         .expect("Failed to exit boot services");
@@ -416,8 +415,7 @@ fn load_kernel_file_from_tftp_boot_server(
 fn create_page_tables(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> bootloader_x86_64_common::PageTables {
-    // UEFI identity-maps all memory, so the offset between physical and virtual
-    // addresses is 0
+    // UEFI identity-maps all memory, so the offset between physical and virtual addresses is 0
     let phys_offset = VirtAddr::new(0);
 
     // copy the currently active level 4 page table, because it might be read-only
@@ -441,13 +439,11 @@ fn create_page_tables(
             }
         };
 
-        // copy the first entry (we don't need to access more than 512 GiB; also, some
-        // UEFI implementations seem to create an level 4 table entry 0 in all
-        // slots)
+        // copy the first entry (we don't need to access more than 512 GiB; also, some UEFI
+        // implementations seem to create an level 4 table entry 0 in all slots)
         new_table[0] = old_table[0].clone();
 
-        // the first level 4 table entry is now identical, so we can just load the new
-        // one
+        // the first level 4 table entry is now identical, so we can just load the new one
         unsafe {
             x86_64::registers::control::Cr3::write(
                 new_frame,
