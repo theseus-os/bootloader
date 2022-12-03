@@ -54,7 +54,7 @@ pub struct BootInfo {
     pub rsdp_addr: Optional<u64>,
     /// The thread local storage (TLS) template of the kernel executable, if present.
     pub tls_template: Optional<TlsTemplate>,
-    /// The UEFI modules in the image.
+    /// Files stored in the modules subdirectory of the kernel image.
     pub modules: Modules,
     /// The ELF sections of the kernel executable.
     pub elf_sections: ElfSections,
@@ -284,10 +284,12 @@ pub struct TlsTemplate {
     pub mem_size: u64,
 }
 
+/// FFI-safe slice of [`Module`] structs, semantically equivalent to
+/// `&'static mut [Module]`.
 #[derive(Debug)]
 #[repr(C)]
 pub struct Modules {
-    pub ptr: *mut Module,
+    pub(crate) ptr: *mut Module,
     pub(crate) len: usize,
 }
 
@@ -320,15 +322,34 @@ impl From<Modules> for &'static mut [Module] {
     }
 }
 
-/// A file in the `modules` directory in the kernel image.
+/// A file.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Module {
+    /// The name of the module encoded as a null-terminated UTF-8 string.
     pub name: [u8; 64],
+    /// The offset in bytes from the start of the modules.
+    ///
+    /// The offset is guaranteed to be page aligned.
     pub offset: usize,
+    /// The length of the module in bytes.
     pub len: usize,
 }
 
+impl Module {
+    /// The name of the module.
+    pub fn name(&self) -> &str {
+        let end = self
+            .name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or_else(|| self.name.len());
+        core::str::from_utf8(&self.name[..end]).expect("invalid bytes in module name")
+    }
+}
+
+/// FFI-safe slice of [`ElfSection`] structs, semantically equivalent to
+/// `&'static mut [ElfSection]`.
 #[derive(Debug)]
 #[repr(C)]
 pub struct ElfSections {
@@ -365,13 +386,30 @@ impl From<ElfSections> for &'static mut [ElfSection] {
     }
 }
 
+/// An ELF section.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct ElfSection {
+    /// The name of the section encoded as a null-terminated UTF-8 string.
     pub name: [u8; 64],
+    /// The starting virtual address of the section.
     pub start: usize,
+    /// The size of the section in bytes.
     pub size: usize,
+    /// The section flags.
     pub flags: u64,
+}
+
+impl ElfSection {
+    /// The name of the section.
+    pub fn name(&self) -> &str {
+        let end = self
+            .name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or_else(|| self.name.len());
+        core::str::from_utf8(&self.name[..end]).expect("invalid bytes in section name")
+    }
 }
 
 /// FFI-safe variant of [`Option`].

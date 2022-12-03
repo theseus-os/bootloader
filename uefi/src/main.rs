@@ -109,10 +109,9 @@ fn main_inner(image: Handle, mut st: SystemTable<Boot>) -> Status {
         .exit_boot_services(image, mmap_storage)
         .expect("Failed to exit boot services");
 
-    // Allocating frames below 0x10_000 causes problems when allocating AP
-    // startup trampolines
+    // Allocating frames below 0x10000 causes problems during AP startup.
     let mut frame_allocator = LegacyFrameAllocator::new_starting_at(
-        PhysFrame::containing_address(PhysAddr::new(0x10_000)),
+        PhysFrame::containing_address(PhysAddr::new(0x10000)),
         memory_map.copied().map(UefiMemoryDescriptor),
     );
 
@@ -249,8 +248,7 @@ fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut
         if !info.attribute().contains(FileAttribute::DIRECTORY) {
             num_modules += 1;
             // Theseus modules must not share pages i.e. the next module starts on a new
-            // page.
-            // TODO: Ideally we'd remove this constraint.
+            // page. TODO: Ideally we'd remove this constraint.
             num_pages += calculate_pages(info.file_size() as usize);
         }
     }
@@ -381,8 +379,7 @@ fn load_kernel_file_from_tftp_boot_server(
     Some(kernel_slice)
 }
 
-/// Creates page table abstraction types for both the bootloader and kernel page
-/// tables.
+/// Creates page table abstraction types for both the bootloader and kernel page tables.
 fn create_page_tables(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> bootloader_x86_64_common::PageTables {
