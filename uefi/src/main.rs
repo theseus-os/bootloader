@@ -30,7 +30,7 @@ use uefi::{
     table::boot::{
         AllocateType, MemoryDescriptor, MemoryType, OpenProtocolAttributes, OpenProtocolParams,
     },
-    CStr16, CStr8,
+    CStr8,
 };
 use x86_64::{
     structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
@@ -196,25 +196,19 @@ fn open_file_system(image: Handle, st: &SystemTable<Boot>) -> Option<&mut Simple
 
 fn allocate_slice<T>(len: usize, ty: MemoryType, st: &SystemTable<Boot>) -> &'static mut [T] {
     let size = core::mem::size_of::<T>() * len;
-    let num_pages = ((size - 1) / 4096) + 1;
-    // log::info!("allocating: {size:0x?} {num_pages}");
+    let num_pages = calculate_pages(size);
     let ptr = st
         .boot_services()
         .allocate_pages(AllocateType::AnyPages, ty, num_pages)
         .unwrap() as *mut T;
-    // log::info!("allocated");
-    unsafe { ptr::write_bytes(ptr, 0, size) };
-    // log::info!("writing");
-    let slice = unsafe { slice::from_raw_parts_mut(ptr, size) };
-    // log::info!("constructing");
+    unsafe { ptr::write_bytes(ptr, 0, len) };
+    let slice = unsafe { slice::from_raw_parts_mut(ptr, len) };
     slice
 }
 
-fn load_file_from_disk(
-    filename: &CStr16,
-    file_system: &mut SimpleFileSystem,
-    st: &SystemTable<Boot>,
-) -> Option<&'static mut [u8]> {
+fn load_kernel_file_from_disk(image: Handle, st: &SystemTable<Boot>) -> Option<&'static mut [u8]> {
+    let file_system = open_file_system(image, st)?;
+    let filename = cstr16!("kernel-x86_64");
     let mut root = file_system.open_volume().unwrap();
     let file_handle = root
         .open(filename, FileMode::Read, FileAttribute::empty())
@@ -234,12 +228,6 @@ fn load_file_from_disk(
     Some(slice)
 }
 
-fn load_kernel_file_from_disk(image: Handle, st: &SystemTable<Boot>) -> Option<&'static mut [u8]> {
-    let file_system = open_file_system(image, st)?;
-    let filename = cstr16!("kernel-x86_64");
-    load_file_from_disk(filename, file_system, st)
-}
-
 fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut [Module] {
     let file_system = open_file_system(image, st).unwrap();
     let mut root = file_system.open_volume().unwrap();
@@ -256,36 +244,15 @@ fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut
     while let Some(info) = dir.read_entry(&mut buf).unwrap() {
         if !info.attribute().contains(FileAttribute::DIRECTORY) {
             num_modules += 1;
-            num_pages += ((info.file_size() as usize - 1) / 4096) + 1;
+            // Theseus modules must not share pages i.e. the next module starts on a new
+            // page.
+            // TODO: Ideally we'd remove this constraint.
+            num_pages += calculate_pages(info.file_size() as usize);
         }
     }
 
-    let modules: &'static mut [Module] = {
-        let len = num_modules;
-        let size = core::mem::size_of::<Module>() * len;
-        let num_pages = ((size - 1) / 4096) + 1;
-        // log::info!("allocating: {size:0x?} {num_pages}");
-        let ptr = st
-            .boot_services()
-            .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, num_pages)
-            .unwrap() as *mut Module;
-        // log::info!("allocated");
-        unsafe { ptr::write_bytes(ptr, 0, len) };
-        // log::info!("writing");
-        let slice = unsafe { slice::from_raw_parts_mut(ptr, len) };
-        // log::info!("constructing");
-        slice
-    };
-    let raw_bytes: &'static mut [u8] = {
-        let ptr = st
-            .boot_services()
-            .allocate_pages(AllocateType::AnyPages, MemoryType::custom(0x80000000), num_pages)
-            .unwrap() as *mut u8;
-        let len = num_pages * 4096;
-        unsafe { ptr::write_bytes(ptr, 0, len) };
-        let slice = unsafe { slice::from_raw_parts_mut(ptr, len) };
-        slice
-    };
+    let modules = allocate_slice(num_modules, MemoryType::LOADER_DATA, st);
+    let raw_bytes = allocate_slice(num_pages * 4096, MemoryType::custom(0x80000000), st);
 
     dir.reset_entry_readout().unwrap();
 
@@ -320,7 +287,7 @@ fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut
             };
 
             idx += 1;
-            num_pages += ((len - 1) / 4096) + 1;
+            num_pages += calculate_pages(len);
         }
     }
 
@@ -410,8 +377,7 @@ fn load_kernel_file_from_tftp_boot_server(
     Some(kernel_slice)
 }
 
-/// Creates page table abstraction types for both the bootloader and kernel page
-/// tables.
+/// Creates page table abstraction types for both the bootloader and kernel page tables.
 fn create_page_tables(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> bootloader_x86_64_common::PageTables {
@@ -538,6 +504,10 @@ fn init_logger(st: &SystemTable<Boot>, config: BootloaderConfig) -> Option<RawFr
         addr: PhysAddr::new(framebuffer.as_mut_ptr() as u64),
         info,
     })
+}
+
+fn calculate_pages(bytes: usize) -> usize {
+    ((bytes - 1) / 4096) + 1
 }
 
 #[cfg(target_os = "uefi")]
