@@ -163,8 +163,6 @@ where
     enable_write_protect_bit();
 
     let config = kernel.config;
-    // let kernel_slice_start = kernel.start_address as u64;
-    // let kernel_slice_len = u64::try_from(kernel.len).unwrap();
 
     let (kernel_slice_start, kernel_slice_len, entry_point, tls_template) =
         load_kernel::load_kernel(
@@ -177,18 +175,9 @@ where
     log::info!("Entry point at: {:#x}", entry_point.as_u64());
 
     // create a stack
-    // let stack_start_addr = mapping_addr(
-    //     config.mappings.kernel_stack,
-    //     config.kernel_stack_size,
-    //     16,
-    //     &mut used_entries,
-    // );
-    // let stack_section = kernel.elf.find_section_by_name(".stack").unwrap();
     let stack_start_addr = mapping_addr(
         config.mappings.kernel_stack,
-        // Mapping::FixedAddress(stack_section.address()),
         config.kernel_stack_size,
-        // stack_section.size(),
         // TODO
         4096,
         &mut used_entries,
@@ -198,8 +187,6 @@ where
         let end_addr = stack_start_addr + config.kernel_stack_size;
         Page::containing_address(end_addr - 1u64)
     };
-    log::info!("stack_start: {stack_start:0x?}");
-    log::info!("stack_end: {stack_end:0x?}");
     for page in Page::range_inclusive(stack_start, stack_end) {
         let frame = frame_allocator
             .allocate_frame()
@@ -210,8 +197,6 @@ where
             Err(err) => panic!("failed to map page {:?}: {:?}", page, err),
         }
     }
-    // let stack_section = kernel.elf.find_section_by_name(".stack").unwrap();
-    // let stack_end = Page::containing_address(VirtAddr::new(stack_section.address() + stack_section.size() - 4096));
 
     // identity-map context switch function, so that we don't get an immediate pagefault
     // after switching the active page table
@@ -485,7 +470,6 @@ where
 
     log::info!("Copy modules");
 
-    // copy modules
     let modules_info = MaybeUninit::write_slice(modules_info, modules);
 
     log::info!("Create elf sections");
