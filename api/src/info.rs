@@ -1,4 +1,4 @@
-use core::{ops, slice};
+use core::{ops, slice, str};
 
 use crate::config::ApiVersion;
 
@@ -22,6 +22,8 @@ use crate::config::ApiVersion;
 pub struct BootInfo {
     /// The version of the `bootloader_api` crate. Must match the `bootloader` version.
     pub api_version: ApiVersion,
+    /// The size of the boot info.
+    pub size: usize,
     /// A map of the physical memory regions of the underlying machine.
     ///
     /// The bootloader queries this information from the BIOS/UEFI firmware and translates this
@@ -52,21 +54,28 @@ pub struct BootInfo {
     pub rsdp_addr: Optional<u64>,
     /// The thread local storage (TLS) template of the kernel executable, if present.
     pub tls_template: Optional<TlsTemplate>,
+    /// Files stored in the modules subdirectory of the kernel image.
+    pub modules: Modules,
+    /// The ELF sections of the kernel executable.
+    pub elf_sections: ElfSections,
 }
 
 impl BootInfo {
-    /// Create a new boot info structure with the given memory map.
+    /// Create a new boot info structure with the given memory map, modules, and elf sections.
     ///
     /// The other fields are initialized with default values.
-    pub fn new(memory_regions: MemoryRegions) -> Self {
+    pub fn new(memory_regions: MemoryRegions, modules: Modules, elf_sections: ElfSections) -> Self {
         Self {
             api_version: ApiVersion::new_default(),
+            size: 0,
             memory_regions,
             framebuffer: Optional::None,
             physical_memory_offset: Optional::None,
             recursive_index: Optional::None,
             rsdp_addr: Optional::None,
             tls_template: Optional::None,
+            modules,
+            elf_sections,
         }
     }
 }
@@ -273,6 +282,134 @@ pub struct TlsTemplate {
     ///
     /// Corresponds to the combined length of the `.tdata` and `.tbss` sections.
     pub mem_size: u64,
+}
+
+/// FFI-safe slice of [`Module`] structs, semantically equivalent to
+/// `&'static mut [Module]`.
+#[derive(Debug)]
+#[repr(C)]
+pub struct Modules {
+    pub(crate) ptr: *mut Module,
+    pub(crate) len: usize,
+}
+
+impl ops::Deref for Modules {
+    type Target = [Module];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl ops::DerefMut for Modules {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl From<&'static mut [Module]> for Modules {
+    fn from(modules: &'static mut [Module]) -> Self {
+        Self {
+            ptr: modules.as_mut_ptr(),
+            len: modules.len(),
+        }
+    }
+}
+
+impl From<Modules> for &'static mut [Module] {
+    fn from(modules: Modules) -> Self {
+        unsafe { slice::from_raw_parts_mut(modules.ptr, modules.len) }
+    }
+}
+
+/// A file.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Module {
+    /// The name of the module encoded as a null-terminated UTF-8 string.
+    pub name: [u8; 64],
+    /// The offset in bytes from the start of the modules.
+    ///
+    /// The offset is guaranteed to be page aligned.
+    pub offset: usize,
+    /// The length of the module in bytes.
+    pub len: usize,
+}
+
+impl Module {
+    /// The name of the module.
+    pub fn name(&self) -> &str {
+        let end = self
+            .name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or_else(|| self.name.len());
+        str::from_utf8(&self.name[..end]).expect("invalid bytes in module name")
+    }
+}
+
+/// FFI-safe slice of [`ElfSection`] structs, semantically equivalent to
+/// `&'static mut [ElfSection]`.
+#[derive(Debug)]
+#[repr(C)]
+pub struct ElfSections {
+    pub(crate) ptr: *mut ElfSection,
+    pub(crate) len: usize,
+}
+
+impl ops::Deref for ElfSections {
+    type Target = [ElfSection];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl ops::DerefMut for ElfSections {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl From<&'static mut [ElfSection]> for ElfSections {
+    fn from(elf_sections: &'static mut [ElfSection]) -> Self {
+        Self {
+            ptr: elf_sections.as_mut_ptr(),
+            len: elf_sections.len(),
+        }
+    }
+}
+
+impl From<ElfSections> for &'static mut [ElfSection] {
+    fn from(elf_sections: ElfSections) -> Self {
+        unsafe { slice::from_raw_parts_mut(elf_sections.ptr, elf_sections.len) }
+    }
+}
+
+/// An ELF section.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct ElfSection {
+    /// The name of the section encoded as a null-terminated UTF-8 string.
+    pub name: [u8; 64],
+    /// The starting virtual address of the section.
+    pub start: usize,
+    /// The size of the section in bytes.
+    pub size: usize,
+    /// The section flags.
+    pub flags: u64,
+}
+
+impl ElfSection {
+    /// The name of the section.
+    pub fn name(&self) -> &str {
+        let end = self
+            .name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or_else(|| self.name.len());
+        str::from_utf8(&self.name[..end]).expect("invalid bytes in section name")
+    }
 }
 
 /// FFI-safe variant of [`Option`].
