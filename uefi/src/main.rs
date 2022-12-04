@@ -4,13 +4,16 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::memory_descriptor::UefiMemoryDescriptor;
-use bootloader_api::{info::FrameBufferInfo, BootloaderConfig};
+use bootloader_api::{
+    info::{FrameBufferInfo, Module},
+    BootloaderConfig,
+};
 use bootloader_x86_64_common::{
     legacy_memory_region::LegacyFrameAllocator, Kernel, RawFrameBufferInfo, SystemInfo,
 };
 use core::{cell::UnsafeCell, fmt::Write, mem, ptr, slice};
 use uefi::{
-    prelude::{entry, Boot, Handle, Status, SystemTable},
+    prelude::{cstr16, entry, Boot, Handle, Status, SystemTable},
     proto::{
         console::gop::{GraphicsOutput, PixelFormat},
         device_path::DevicePath,
@@ -27,7 +30,7 @@ use uefi::{
     table::boot::{
         AllocateType, MemoryDescriptor, MemoryType, OpenProtocolAttributes, OpenProtocolParams,
     },
-    CStr16, CStr8,
+    CStr8,
 };
 use x86_64::{
     structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
@@ -89,6 +92,9 @@ fn main_inner(image: Handle, mut st: SystemTable<Boot>) -> Status {
         log::info!("Using framebuffer at {:#x}", framebuffer.addr);
     }
 
+    log::info!("Loading modules");
+    let modules = load_modules_from_disk(image, &st);
+
     let mmap_storage = {
         let max_mmap_size =
             st.boot_services().memory_map_size().map_size + 8 * mem::size_of::<MemoryDescriptor>();
@@ -98,13 +104,16 @@ fn main_inner(image: Handle, mut st: SystemTable<Boot>) -> Status {
         unsafe { slice::from_raw_parts_mut(ptr, max_mmap_size) }
     };
 
-    log::trace!("exiting boot services");
+    log::trace!("Exiting boot services");
     let (system_table, memory_map) = st
         .exit_boot_services(image, mmap_storage)
         .expect("Failed to exit boot services");
 
-    let mut frame_allocator =
-        LegacyFrameAllocator::new(memory_map.copied().map(UefiMemoryDescriptor));
+    // Allocating frames below 0x10000 causes problems during AP startup.
+    let mut frame_allocator = LegacyFrameAllocator::new_starting_at(
+        PhysFrame::containing_address(PhysAddr::new(0x10000)),
+        memory_map.copied().map(UefiMemoryDescriptor),
+    );
 
     let page_tables = create_page_tables(&mut frame_allocator);
 
@@ -126,6 +135,7 @@ fn main_inner(image: Handle, mut st: SystemTable<Boot>) -> Status {
         kernel,
         frame_allocator,
         page_tables,
+        modules,
         system_info,
     );
 }
@@ -141,7 +151,7 @@ fn load_kernel_file(image: Handle, st: &SystemTable<Boot>) -> Option<&'static mu
         .or_else(|| load_kernel_file_from_tftp_boot_server(image, st))
 }
 
-fn load_kernel_file_from_disk(image: Handle, st: &SystemTable<Boot>) -> Option<&'static mut [u8]> {
+fn open_file_system(image: Handle, st: &SystemTable<Boot>) -> Option<&mut SimpleFileSystem> {
     let file_system_raw = {
         let this = st.boot_services();
         let loaded_image = this
@@ -184,11 +194,25 @@ fn load_kernel_file_from_disk(image: Handle, st: &SystemTable<Boot>) -> Option<&
         )
     }
     .unwrap();
-    let file_system = unsafe { &mut *file_system_raw.interface.get() };
+    Some(unsafe { &mut *file_system_raw.interface.get() })
+}
 
+fn allocate_slice<T>(len: usize, ty: MemoryType, st: &SystemTable<Boot>) -> &'static mut [T] {
+    let size = core::mem::size_of::<T>() * len;
+    let num_pages = calculate_pages(size);
+    let ptr = st
+        .boot_services()
+        .allocate_pages(AllocateType::AnyPages, ty, num_pages)
+        .unwrap() as *mut T;
+    unsafe { ptr::write_bytes(ptr, 0, len) };
+    let slice = unsafe { slice::from_raw_parts_mut(ptr, len) };
+    slice
+}
+
+fn load_kernel_file_from_disk(image: Handle, st: &SystemTable<Boot>) -> Option<&'static mut [u8]> {
+    let file_system = open_file_system(image, st)?;
     let mut root = file_system.open_volume().unwrap();
-    let mut buf = [0; 14 * 2];
-    let filename = CStr16::from_str_with_buf("kernel-x86_64", &mut buf).unwrap();
+    let filename = cstr16!("kernel-x86_64");
     let kernel_file_handle = root
         .open(filename, FileMode::Read, FileAttribute::empty())
         .expect("Failed to load kernel (expected file named `kernel-x86_64`)");
@@ -201,19 +225,75 @@ fn load_kernel_file_from_disk(image: Handle, st: &SystemTable<Boot>) -> Option<&
     let kernel_info: &mut FileInfo = kernel_file.get_info(&mut buf).unwrap();
     let kernel_size = usize::try_from(kernel_info.file_size()).unwrap();
 
-    let kernel_ptr = st
-        .boot_services()
-        .allocate_pages(
-            AllocateType::AnyPages,
-            MemoryType::LOADER_DATA,
-            ((kernel_size - 1) / 4096) + 1,
-        )
-        .unwrap() as *mut u8;
-    unsafe { ptr::write_bytes(kernel_ptr, 0, kernel_size) };
-    let kernel_slice = unsafe { slice::from_raw_parts_mut(kernel_ptr, kernel_size) };
+    let kernel_slice = allocate_slice(kernel_size, MemoryType::LOADER_DATA, st);
     kernel_file.read(kernel_slice).unwrap();
 
     Some(kernel_slice)
+}
+
+fn load_modules_from_disk(image: Handle, st: &SystemTable<Boot>) -> &'static mut [Module] {
+    let file_system = open_file_system(image, st).unwrap();
+    let mut root = file_system.open_volume().unwrap();
+    let mut dir = root
+        .open(cstr16!("modules"), FileMode::Read, FileAttribute::empty())
+        .unwrap()
+        .into_directory()
+        .unwrap();
+
+    let mut num_modules = 0;
+    let mut num_pages = 0;
+    let mut buf = [0; 500];
+
+    while let Some(info) = dir.read_entry(&mut buf).unwrap() {
+        if !info.attribute().contains(FileAttribute::DIRECTORY) {
+            num_modules += 1;
+            // Theseus modules must not share pages i.e. the next module starts on a new
+            // page. TODO: Ideally we'd remove this constraint.
+            num_pages += calculate_pages(info.file_size() as usize);
+        }
+    }
+
+    let modules = allocate_slice(num_modules, MemoryType::LOADER_DATA, st);
+    let raw_bytes = allocate_slice(num_pages * 4096, MemoryType::custom(0x80000000), st);
+
+    dir.reset_entry_readout().unwrap();
+
+    let mut idx = 0;
+    let mut num_pages = 0;
+
+    while let Some(info) = dir.read_entry(&mut buf).unwrap() {
+        if !info.attribute().contains(FileAttribute::DIRECTORY) {
+            let name = info.file_name();
+
+            let len = info.file_size() as usize;
+            let mut file = dir
+                .open(info.file_name(), FileMode::Read, FileAttribute::empty())
+                .unwrap()
+                .into_regular_file()
+                .unwrap();
+
+            file.read(&mut raw_bytes[(num_pages * 4096)..]).unwrap();
+
+            let mut name_buf = [0; 64];
+            let mut name_idx = 0;
+            for c16 in name.iter() {
+                let c = char::from(*c16);
+                let s = c.encode_utf8(&mut name_buf[name_idx..(name_idx + 4)]);
+                name_idx += s.len();
+            }
+
+            modules[idx] = Module {
+                name: name_buf,
+                offset: num_pages * 4096,
+                len,
+            };
+
+            idx += 1;
+            num_pages += calculate_pages(len);
+        }
+    }
+
+    modules
 }
 
 /// Try to load a kernel from a TFTP boot server.
@@ -426,6 +506,10 @@ fn init_logger(st: &SystemTable<Boot>, config: BootloaderConfig) -> Option<RawFr
         addr: PhysAddr::new(framebuffer.as_mut_ptr() as u64),
         info,
     })
+}
+
+fn calculate_pages(bytes: usize) -> usize {
+    ((bytes - 1) / 4096) + 1
 }
 
 #[cfg(target_os = "uefi")]
