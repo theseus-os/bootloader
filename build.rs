@@ -244,32 +244,32 @@ fn build_uefi_bootloader(out_dir: &Path) -> PathBuf {
 //     convert_elf_to_bin(elf_path)
 // }
 
-fn convert_elf_to_bin(elf_path: PathBuf) -> PathBuf {
-    let flat_binary_path = elf_path.with_extension("bin");
+// fn convert_elf_to_bin(elf_path: PathBuf) -> PathBuf {
+//     let flat_binary_path = elf_path.with_extension("bin");
 
-    let llvm_tools = llvm_tools::LlvmTools::new().expect("failed to get llvm tools");
-    let objcopy = llvm_tools
-        .tool(&llvm_tools::exe("llvm-objcopy"))
-        .expect("LlvmObjcopyNotFound");
+//     let llvm_tools = llvm_tools::LlvmTools::new().expect("failed to get llvm tools");
+//     let objcopy = llvm_tools
+//         .tool(&llvm_tools::exe("llvm-objcopy"))
+//         .expect("LlvmObjcopyNotFound");
 
-    // convert first stage to binary
-    let mut cmd = Command::new(objcopy);
-    cmd.arg("-I").arg("elf64-x86-64");
-    cmd.arg("-O").arg("binary");
-    cmd.arg("--binary-architecture=i386:x86-64");
-    cmd.arg(&elf_path);
-    cmd.arg(&flat_binary_path);
-    let output = cmd
-        .output()
-        .expect("failed to execute llvm-objcopy command");
-    if !output.status.success() {
-        panic!(
-            "objcopy failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    flat_binary_path
-}
+//     // convert first stage to binary
+//     let mut cmd = Command::new(objcopy);
+//     cmd.arg("-I").arg("elf64-x86-64");
+//     cmd.arg("-O").arg("binary");
+//     cmd.arg("--binary-architecture=i386:x86-64");
+//     cmd.arg(&elf_path);
+//     cmd.arg(&flat_binary_path);
+//     let output = cmd
+//         .output()
+//         .expect("failed to execute llvm-objcopy command");
+//     if !output.status.success() {
+//         panic!(
+//             "objcopy failed: {}",
+//             String::from_utf8_lossy(&output.stderr)
+//         );
+//     }
+//     flat_binary_path
+// }
 
 // dummy implementations because docsrs builds have no network access
 
