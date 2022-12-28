@@ -14,9 +14,6 @@ members = [
     "api",
     "common",
     "uefi",
-    "bios/boot_sector",
-    "bios/stage-*",
-    "bios/common",
     "tests/runner",
     "tests/test_kernels/default_settings",
     "tests/test_kernels/map_phys_mem",
@@ -35,13 +32,11 @@ repository = "https://github.com/rust-osdev/bootloader"
 [workspace.dependencies]
 bootloader_api = { version = "0.11.0", path = "api" }
 bootloader-x86_64-common = { version = "0.11.0", path = "common" }
-bootloader-x86_64-bios-common = { version = "0.11.0", path = "bios/common" }
 
 [dependencies]
 anyhow = "1.0.32"
 fatfs = "0.3.4"
 gpt = "3.0.0"
-mbrman = "0.5.1"
 tempfile = "3.3.0"
 
 [dev-dependencies]
@@ -57,35 +52,6 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 lto = false
-debug = true
-overflow-checks = true
-
-# duplicated from `bios/boot_sector/Cargo.toml`
-[profile.stage-1]
-inherits = "release"
-opt-level = "s"
-lto = true
-codegen-units = 1
-debug = false
-overflow-checks = false
-
-# duplicated from `bios/stage-2/Cargo.toml`
-[profile.stage-2]
-inherits = "release"
-opt-level = "s"
-codegen-units = 1
-debug = false
-overflow-checks = true
-
-# duplicated from `bios/stage-3/Cargo.toml`
-[profile.stage-3]
-inherits = "release"
-debug = true
-overflow-checks = true
-
-# duplicated from `bios/stage-4/Cargo.toml`
-[profile.stage-4]
-inherits = "release"
 debug = true
 overflow-checks = true
 
